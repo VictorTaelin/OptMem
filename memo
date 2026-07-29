@@ -478,7 +478,7 @@ def nap_prompt(d, lo, hi, left):
     tail = "" if not left else "\n%s after this one." % (
         "1 compression remains" if left == 1 else
         "%d compressions remain" % left)
-    return ("Compress memories #%d-%d into one line of at most %d characters.\n"
+    return ("Compress memories #%d-%d into one line of at most %d bytes.\n"
             "Keep what has lasting effect, drop what does not. Invent "
             "nothing.\n\n"
             "%s\n%s\n"
@@ -513,7 +513,7 @@ then do exactly what it prints, to the end of its output.
 
 ### While working: register memories (mandatory)
 
-Call `{memo} note "<1 line, max {chars} chars>"` whenever you learn
+Call `{memo} note "<1 line, max {chars} bytes>"` whenever you learn
 something new, or something worth keeping happens. That covers a task
 worth real effort, a fact or insight the user teaches you, anything you
 learn about their life (even indirectly), any event of lasting effect.
@@ -653,7 +653,7 @@ def cmd_wake(d, args):
 
 def cmd_note(d, args):
     if len(args) != 1:
-        die("usage: %s note \"<one line, at most %d chars>\""
+        die("usage: %s note \"<one line, at most %d bytes>\""
             % (ME, ENTRY_CHARS))
     text = check(args[0])
     i = log_append(d, [(datetime.date.today().isoformat(), text)])

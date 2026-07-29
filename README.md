@@ -21,7 +21,7 @@ The tool lands at `~/.optmem/memo`; put `~/.optmem` on `PATH` to type `memo`.
 | | |
 |---|---|
 | `memo wake` | read the memory — the first command of every session |
-| `memo note "..."` | record one memory: one line, up to 280 chars |
+| `memo note "..."` | record one memory: one line, up to 280 bytes |
 | `memo nap` | answer the merges that came due |
 | `memo recall <regex>` | search every memory ever recorded, word for word |
 | `memo zoom <lo>-<hi>` | open a tree node into its two halves |
@@ -77,7 +77,7 @@ then do exactly what it prints, to the end of its output.
 
 ### While working: register memories (mandatory)
 
-Call `~/.optmem/memo note "<1 line, max 280 chars>"` whenever you learn
+Call `~/.optmem/memo note "<1 line, max 280 bytes>"` whenever you learn
 something new, or something worth keeping happens. That covers a task
 worth real effort, a fact or insight the user teaches you, anything you
 learn about their life (even indirectly), any event of lasting effect.
