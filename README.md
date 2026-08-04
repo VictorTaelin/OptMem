@@ -82,6 +82,9 @@ something new, or something worth keeping happens. That covers a task
 worth real effort, a fact or insight the user teaches you, anything you
 learn about their life (even indirectly), any event of lasting effect.
 
+Never include a date or timestamp in memory text. OptMem records dates
+separately. Start each note and compression directly with the lasting fact.
+
 Do not register redundant memories.
 
 If `~/.optmem/memo note` asks a compression: do it before your next action.
