@@ -155,6 +155,8 @@ check(noenv.returncode == 1 and "memo init" in noenv.stderr,
 init = subprocess.run(memo + ["init"], capture_output=True, text=True, env=fresh)
 check(init.returncode == 0 and "## Memory" in init.stdout
       and "You are a" in init.stdout, "init must print the AGENTS.md block")
+check("Never include a date or timestamp in memory text" in init.stdout,
+      "init must keep date metadata out of memory text")
 check(os.path.exists(os.path.join(fresh["HOME"], ".optmem", "memory", "config")),
       "init must create ~/.optmem/memory with its config")
 again = subprocess.run(memo + ["init"], capture_output=True, text=True, env=fresh)
@@ -235,6 +237,8 @@ check("None" not in r.stdout, "the refusal printed a Python None")
 naps = 0
 r = run("nap")
 check("Compress memories #" in r.stdout, "nap prompt must name its object")
+check("Never include a date or timestamp" in r.stdout,
+      "nap prompt must keep date metadata out of summaries")
 while "Nothing left to compress" not in r.stdout:
     line = offered(r.stdout)
     check(bool(line), "no command offered:\n" + r.stdout + r.stderr)

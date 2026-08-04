@@ -480,7 +480,8 @@ def nap_prompt(d, lo, hi, left):
         "%d compressions remain" % left)
     return ("Compress memories #%d-%d into one line of at most %d bytes.\n"
             "Keep what has lasting effect, drop what does not. Invent "
-            "nothing.\n\n"
+            "nothing. Never include a date or timestamp; start directly "
+            "with the lasting fact.\n\n"
             "%s\n%s\n"
             "Run: %s nap %d-%d \"<your line>\""
             % (lo, hi - 1, ENTRY_CHARS, body, tail, ME, lo, hi - 1))
@@ -517,6 +518,9 @@ Call `{memo} note "<1 line, max {chars} bytes>"` whenever you learn
 something new, or something worth keeping happens. That covers a task
 worth real effort, a fact or insight the user teaches you, anything you
 learn about their life (even indirectly), any event of lasting effect.
+
+Never include a date or timestamp in memory text. OptMem records dates
+separately. Start each note and compression directly with the lasting fact.
 
 Do not register redundant memories.
 
