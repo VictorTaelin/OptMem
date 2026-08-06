@@ -49,11 +49,17 @@ ME = pretty(__file__)
 # at these defaults, so a memory that overrides nothing follows the tool.
 KNOBS = {
     "WAKE_LINES": (96, "the memory context: how many lines wake prints"),
+    "WAKE_CHARS": (1000000, "the memory context: how many bytes wake prints"),
     "ENTRY_CHARS": (280, "the longest one memory may be, in bytes"),
     "PART_CHARS": (20000, "output paging: largest part, in bytes"),
     "PART_LINES": (500, "output paging: largest part, in lines"),
 }
 WAKE_LINES = KNOBS["WAKE_LINES"][0]  # ~8k tokens of dense text, in 2 parts
+# A line budget alone cannot hold the memory inside a harness that measures
+# bytes: the same 96 lines are 14 KB new and 27 KB once the tree has collapsed.
+# Paging cannot help a startup hook, which prints once and is truncated in
+# place, so wake also fits itself to a byte budget. It is off unless lowered.
+WAKE_CHARS = KNOBS["WAKE_CHARS"][0]
 ENTRY_CHARS = KNOBS["ENTRY_CHARS"][0]
 # Every harness truncates a command that prints too much, and each drops a
 # different piece: Claude Code cuts the middle at 30,000 chars, pi cuts the
@@ -581,27 +587,10 @@ def paginate(lines):
     return parts
 
 
-def cmd_wake(d, args):
-    now = log_len(d)
-    k, T = 1, now
-    if args:
-        if len(args) > 2 or not all(a.isdigit() for a in args):
-            die("usage: %s wake [part [T]]" % ME)
-        k = int(args[0])
-        if len(args) == 2:
-            T = int(args[1])
-            if T > now:
-                die("T=%d, but the log holds %s. Run: %s wake"
-                    % (T, plural(now, "memory"), ME))
-    # A part is rendered as of T, so a note landing between two parts cannot
-    # shift a boundary and drop a line.
-    if not T:
-        print("No memories yet. Record the first with: %s note \"<one line>\""
-              % ME)
-        print("You are awake.")
-        return
+def wake_lines(d, T, budget):
+    """The memory as `budget` blocks: one line each, oldest first."""
     lines = []
-    for lo, hi in cover(T, WAKE_LINES):
+    for lo, hi in cover(T, budget):
         if hi - lo == 1:
             lines.append("#%d %s %s" % log_get(d, lo))
         else:
@@ -627,6 +616,51 @@ def cmd_wake(d, args):
                 die("The summary of #%d-%d is blank. Run: %s forget %d-%d"
                     % (lo, hi - 1, ME, lo, hi - 1))
             lines.append("#%d-%d %s" % (lo, hi - 1, s))
+    return lines
+
+
+def wake_fit(d, T, room):
+    """The finest memory that fits `room` bytes: at most WAKE_LINES blocks,
+    fewer if they are too fat. Coarser is always smaller, so walking the budget
+    down from WAKE_LINES finds the best one -- and tries the usual one first."""
+    budget = WAKE_LINES
+    while True:
+        lines = wake_lines(d, T, budget)
+        if budget <= 1:
+            return lines
+        if sum(len(l.encode()) + 1 for l in lines) <= room:
+            return lines
+        budget -= 1
+
+
+def cmd_wake(d, args):
+    now = log_len(d)
+    k, T = 1, now
+    if args:
+        if len(args) > 2 or not all(a.isdigit() for a in args):
+            die("usage: %s wake [part [T]]" % ME)
+        k = int(args[0])
+        if len(args) == 2:
+            T = int(args[1])
+            if T > now:
+                die("T=%d, but the log holds %s. Run: %s wake"
+                    % (T, plural(now, "memory"), ME))
+    # A part is rendered as of T, so a note landing between two parts cannot
+    # shift a boundary and drop a line.
+    if not T:
+        print("No memories yet. Record the first with: %s note \"<one line>\""
+              % ME)
+        print("You are awake.")
+        return
+    # WAKE_CHARS is what the whole read costs, not what the memory costs: a
+    # pending nap is handed over in the same output. Reserve it first and let
+    # the memory spend the rest -- never less than one block, or a tight
+    # budget would wake an agent with no past at all.
+    nap = next_nap(d, T)
+    room = WAKE_CHARS - len(b"You are awake.\n")
+    if nap:
+        room -= len(("\n" + nap + "\n").encode())
+    lines = wake_fit(d, T, max(room, ENTRY_CHARS))
     parts = paginate(lines)
     if not 1 <= k <= len(parts):
         die("No part %d: the memory has %s. Run: %s wake"
@@ -646,7 +680,6 @@ def cmd_wake(d, args):
         # always, even for a one-part memory: the contract an agent is given
         # is "run parts until one says awake", so it must always arrive
         print("You are awake.")
-        nap = next_nap(d, T)
         if nap:
             print("\n" + nap)
 
