@@ -285,6 +285,11 @@ def tree_get(d, lo, hi):
             rec = f.read(TREE_REC)
     except FileNotFoundError:  # not built yet; any other failure is real
         return None
+    if len(rec) < TREE_REC:
+        # A partial trailing record left by a crash. It was never
+        # acknowledged, and `count` does not see it either, so the block is
+        # not built: the next nap drops it and computes it again.
+        return None
     try:
         return rec.decode().rstrip() or None
     except UnicodeDecodeError:
