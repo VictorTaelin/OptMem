@@ -204,6 +204,13 @@ r = run("note", "x" * 281)
 check(r.returncode == 1 and "Too long" in r.stderr, "over-long note accepted")
 r = run("note", "two\nlines")
 check(r.returncode == 1 and "one line" in r.stderr, "multi-line note accepted")
+# a memory is one line the way wake's readers count lines: every boundary
+# str.splitlines() knows, not just \n and \r. one of these in a note would be
+# stored as one line and printed as two, forging a line in wake's output.
+for sep in ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+    r = run("note", "a" + sep + "b")
+    check(r.returncode == 1 and "one line" in r.stderr,
+          "note accepted a line split by %r" % sep)
 r = run("note", "   ")
 check(r.returncode == 1, "empty note accepted")
 r = run("wake")
