@@ -422,9 +422,10 @@ def check(text):
     text = text.strip()
     if not text:
         die("Empty. A memory is one line of text.")
-    if "\n" in text or "\r" in text:
+    lines = text.splitlines()
+    if len(lines) > 1:
         die("%d lines. A memory is one line: merge them, or note them "
-            "separately." % (text.count("\n") + 1))
+            "separately." % len(lines))
     n = len(text.encode())
     if n > ENTRY_CHARS:
         die("Too long: %d bytes, limit %d. Accented characters cost 2 bytes. "
