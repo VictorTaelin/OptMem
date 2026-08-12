@@ -515,6 +515,31 @@ check(r_.returncode == 1 and "Permission denied" in r_.stderr
       "an unreadable level was read as pending work: " + r_.stdout + r_.stderr)
 os.chmod(os.path.join(d3, "TREE", "2"), 0o644)
 
+# a crash mid-write leaves a partial record at the end of a level too. It was
+# never acknowledged and count() does not see it, so the block is not built
+# and `forget` has nothing to drop: wake must offer the nap that rebuilds it,
+# instead of reading the fragment as the summary
+d4 = tempfile.mkdtemp(prefix="optmem-torn-")
+for i in range(6):
+    run("note", "torn store memory %d" % i, store=d4)
+for bid, s in (("0-1", "one"), ("2-3", "two"),
+               ("4-5", "a café far from the sea"), ("0-3", "all")):
+    run("nap", bid, s, store=d4)
+with open(os.path.join(d4, "config"), "w") as f:
+    f.write("WAKE_LINES = 2\n")
+for cut in (7, 6):  # the fragment decodes; the fragment splits a character
+    with open(os.path.join(d4, "TREE", "2"), "r+b") as f:
+        f.truncate(2 * 288 + cut)
+    r = run("wake", store=d4)
+    check("#4-5 a caf" not in r.stdout,
+          "a torn summary was read as a memory:\n" + r.stdout)
+    check(nap_id(r.stdout) == "4-5",
+          "a torn summary must point at the nap that rebuilds it:\n"
+          + r.stdout + r.stderr)
+run("nap", "4-5", "rebuilt", store=d4)
+r = run("wake", store=d4)
+check("#4-5 rebuilt" in r.stdout, "a torn summary did not rebuild:\n" + r.stdout)
+
 # an impossible calendar date would poison every later import: the store's
 # order check compares against it forever
 with open(os.path.join(d3, "bad.txt"), "w") as f:
