@@ -809,6 +809,9 @@ def cmd_import(d, args):
             die("line %d: date %s precedes the previous memory (%s)."
                 % (i, date, last))
         text = text.strip()
+        if len(text.splitlines()) > 1:
+            die("line %d: a memory is one line, but this has %d."
+                % (i, len(text.splitlines())))
         if not text or len(text.encode()) > ENTRY_CHARS:
             die("line %d: %d bytes, limit %d." % (i, len(text.encode()), ENTRY_CHARS))
         out.append((date, text))

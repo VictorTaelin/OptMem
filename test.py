@@ -522,6 +522,17 @@ with open(os.path.join(d3, "bad.txt"), "w") as f:
 r = run("import", os.path.join(d3, "bad.txt"), store=d3)
 check(r.returncode == 1 and "not a real date" in r.stderr,
       "import accepted an impossible date: " + r.stdout + r.stderr)
+
+# a line separator smuggled past readlines() -- it splits only on \n and \r
+# -- would be stored as one memory and printed as two, forging a line in
+# wake's output. note is guarded by check(); import must refuse the same.
+for sep in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+    p = os.path.join(d3, "sep.txt")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("%s a memory%sb\n" % (datetime.date.today().isoformat(), sep))
+    r = run("import", p, store=d3)
+    check(r.returncode == 1 and "one line" in r.stderr,
+          "import accepted a memory split by %r" % sep)
 shutil.rmtree(d3)
 
 # the same blank-record dead end at the other site: a big block's half
