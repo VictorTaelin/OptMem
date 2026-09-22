@@ -2,3 +2,4 @@ anim/node_modules/
 anim/frames/
 anim/shots/
 .DS_Store
+__pycache__/
