@@ -11,6 +11,9 @@
   {memo} config [NAME=N]  show this memory's sizes, or change one.
   {memo} import <file>    bulk-load dated memories (bootstrap only).
 
+Use -h or --help, before or after a command, to print this help without
+reading or changing memory.
+
 The memories live in ~/.optmem/memory, or in $MEMORY_DIR if set.
 See github.com/VictorTaelin/OptMem.
 """
@@ -830,7 +833,8 @@ COMMANDS = {"init": cmd_init, "wake": cmd_wake, "note": cmd_note,
 
 def main():
     usage = __doc__.strip().format(memo=ME)
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 2 or any(argument in ("-h", "--help")
+                              for argument in sys.argv[1:]):
         print(usage)
         sys.exit(0)
     cmd = sys.argv[1]
