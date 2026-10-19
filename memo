@@ -7,7 +7,9 @@
   {memo} nap [id "..."]   do the pending compressions.
   {memo} recall <regex>   search every memory ever recorded.
   {memo} zoom <lo>-<hi>   open a tree node: its two halves.
+  {memo} when <id|lo-hi>  dates of one memory, or of a block's first and last.
   {memo} forget <lo>-<hi> drop a bad summary; nap rebuilds it.
+  {memo} span ...         a note that dies at a deadline. See `span`.
   {memo} config [NAME=N]  show this memory's sizes, or change one.
   {memo} import <file>    bulk-load dated memories (bootstrap only).
 
@@ -22,6 +24,7 @@ except ImportError:
     fcntl = None  # Windows has no fcntl; we fall back to msvcrt below
 import os
 import re
+import sqlite3
 import sys
 from collections import deque
 
@@ -194,6 +197,33 @@ def config(d):
         globals()[k] = v  # a knob's name IS the name of the global it sets
 
 
+def atomic_write(path, data):
+    """Write `path` by temp file, fsync, and rename. A crash leaves the
+    previous file intact (or a sibling `*.new` the readers ignore)."""
+    if isinstance(data, str):
+        data = data.encode()
+    tmp = path + ".new"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    # The file is already durable. A directory fsync publishes the name.
+    # Some platforms refuse to fsync a directory; the rename has happened.
+    try:
+        dirfd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dirfd)
+    except OSError:
+        pass
+    finally:
+        os.close(dirfd)
+
+
 def write_config(d, over):
     """Rewrite `config`: every knob on its own line, commented out unless this
     memory overrides it."""
@@ -202,8 +232,7 @@ def write_config(d, over):
     for k, (default, what) in KNOBS.items():
         out.append("%-2s%-12s = %-6d # %s"
                    % ("" if k in over else "# ", k, over.get(k, default), what))
-    with open(os.path.join(d, "config"), "w", encoding="utf-8") as f:
-        f.write("\n".join(out) + "\n")
+    atomic_write(os.path.join(d, "config"), "\n".join(out) + "\n")
 
 
 def log_path(d):
@@ -494,6 +523,303 @@ def next_nap(d, T):
     return nap_prompt(d, lo, hi, pending_count(d, T) - 1)
 
 
+# ---------------------------------------------------------------- spans
+
+# A span is a note with a deadline: "usage runs out in five days". It must
+# not enter LOG.txt. A summary cannot be edited back to false, so a deadline
+# fact that was merged would outlive its truth. The markdown file is the
+# record. span.sqlite is a cache of those files, rebuilt whenever they
+# disagree, the same relationship TREE/ has to the log.
+#
+# OPTMEM_NOW=YYYY-MM-DDTHH:MM:SSZ freezes the clock. The tests use it. An
+# agent that sets it will expire spans against that instant.
+
+_KEY = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+_INSTANT = re.compile(
+    r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})")
+
+
+def parse_instant(spec):
+    """UTC instant. Accepts a trailing Z or a numeric offset. No zone: refuse.
+    A bare date is a day, not an instant, and is parsed elsewhere."""
+    m = _INSTANT.fullmatch(spec.strip())
+    if not m:
+        raise ValueError(spec)
+    y, mo, d, h, mi, s, zone = m.groups()
+    tz = datetime.timezone.utc
+    if zone != "Z":
+        sign = 1 if zone[0] == "+" else -1
+        zh, zm = zone[1:].split(":")
+        tz = datetime.timezone(sign * datetime.timedelta(hours=int(zh), minutes=int(zm)))
+    try:
+        dt = datetime.datetime(int(y), int(mo), int(d), int(h), int(mi), int(s), tzinfo=tz)
+    except ValueError:
+        raise ValueError(spec)
+    return dt.astimezone(datetime.timezone.utc).replace(microsecond=0)
+
+
+def format_instant(dt):
+    return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def now():
+    raw = os.environ.get("OPTMEM_NOW", "").strip()
+    if not raw:
+        return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    try:
+        return parse_instant(raw)
+    except ValueError:
+        die("OPTMEM_NOW=%s is not an instant. Use YYYY-MM-DDTHH:MM:SSZ." % raw)
+
+
+def parse_when(spec, moment):
+    """The deadline `span` was given, as a UTC instant."""
+    m = re.fullmatch(r"(\d+)([dhms])", spec)
+    if m:
+        n = int(m.group(1))
+        if n < 1:
+            die("A span needs a positive length, not '%s'." % spec)
+        unit = {"d": "days", "h": "hours", "m": "minutes", "s": "seconds"}[m.group(2)]
+        return moment + datetime.timedelta(**{unit: n})
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", spec):
+        try:
+            day = datetime.datetime.strptime(spec, "%Y-%m-%d")
+        except ValueError:
+            die("%s is not a real date." % spec)
+        # Through the end of that UTC day. A date-only deadline checked at
+        # breakfast still holds that evening.
+        return datetime.datetime(day.year, day.month, day.day, 23, 59, 59,
+                                 tzinfo=datetime.timezone.utc)
+    try:
+        return parse_instant(spec)
+    except ValueError:
+        die("'%s' is not a span. Use 5d, 12h, 30m, YYYY-MM-DD, "
+            "or YYYY-MM-DDTHH:MM:SSZ." % spec)
+
+
+def span_dir(d):
+    return os.path.join(d, "span")
+
+
+def span_index(d):
+    return os.path.join(d, "span.sqlite")
+
+
+def span_connect(d):
+    os.makedirs(span_dir(d), exist_ok=True)
+    con = sqlite3.connect(span_index(d))
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA synchronous=FULL")
+    con.execute("""CREATE TABLE IF NOT EXISTS span (
+        file TEXT PRIMARY KEY,
+        key TEXT NOT NULL,
+        until TEXT NOT NULL,
+        written TEXT NOT NULL,
+        body TEXT NOT NULL,
+        mtime_ns INTEGER NOT NULL
+    )""")
+    return con
+
+
+def span_parse(path):
+    """One span file, or None when the file is not one. Callers leave a
+    None in place and say so: a stray markdown file is not expired data."""
+    try:
+        text = open(path, encoding="utf-8").read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text.startswith("---\n"):
+        return None
+    rest = text[4:]
+    end = rest.find("\n---\n")
+    if end < 0:
+        return None
+    fields = {}
+    for line in rest[:end].split("\n"):
+        if not line.strip():
+            continue
+        if ":" not in line:
+            return None
+        k, v = line.split(":", 1)
+        fields[k.strip()] = v.strip()
+    if set(fields) - {"until", "key", "written"}:
+        return None
+    if "until" not in fields or "written" not in fields:
+        return None
+    key = fields.get("key", "")
+    if key and not _KEY.fullmatch(key):
+        return None
+    try:
+        parse_instant(fields["until"])
+        parse_instant(fields["written"])
+    except ValueError:
+        return None
+    body = rest[end + 5:].strip("\n")
+    if not body or "\n" in body:
+        return None
+    return {"key": key, "until": format_instant(parse_instant(fields["until"])),
+            "written": format_instant(parse_instant(fields["written"])), "body": body}
+
+
+def span_render(key, until, written, body):
+    lines = ["---", "until: " + until, "written: " + written]
+    if key:
+        lines.append("key: " + key)
+    lines += ["---", body]
+    return "\n".join(lines) + "\n"
+
+
+def _span_files(d):
+    directory = span_dir(d)
+    if not os.path.isdir(directory):
+        return {}
+    found = {}
+    for name in os.listdir(directory):
+        if not name.endswith(".md"):
+            continue
+        path = os.path.join(directory, name)
+        if os.path.isfile(path):
+            found[name] = os.stat(path).st_mtime_ns
+    return found
+
+
+def _span_sync(d, con, moment):
+    """Files win. A deadline that has passed deletes the file. Returns
+    (live rows soonest-first, names that are not span files)."""
+    found = _span_files(d)
+    rows = {r["file"]: r for r in con.execute("SELECT * FROM span")}
+    stale = set(found) != set(rows) or any(
+        rows[name]["mtime_ns"] != mtime for name, mtime in found.items())
+    if stale:
+        con.execute("DELETE FROM span")
+        for name, mtime in found.items():
+            parsed = span_parse(os.path.join(span_dir(d), name))
+            if parsed is None:
+                continue
+            con.execute("INSERT INTO span VALUES (?,?,?,?,?,?)",
+                        (name, parsed["key"], parsed["until"], parsed["written"],
+                         parsed["body"], mtime))
+        con.commit()
+        rows = {r["file"]: r for r in con.execute("SELECT * FROM span")}
+    live = []
+    for name, row in list(rows.items()):
+        if parse_instant(row["until"]) <= moment:
+            try:
+                os.remove(os.path.join(span_dir(d), name))
+            except FileNotFoundError:
+                pass
+            con.execute("DELETE FROM span WHERE file = ?", (name,))
+        else:
+            live.append(row)
+    con.commit()
+    live.sort(key=lambda r: (r["until"], r["file"]))
+    bad = sorted(name for name in found if name not in rows)
+    return live, bad
+
+
+def span_open(d):
+    """Live spans, and the names of span/*.md files that are not spans.
+    No directory and no index: nothing, and nothing is created. The lock
+    is held: expiry deletes files."""
+    directory, index = span_dir(d), span_index(d)
+    if not os.path.isdir(directory) and not os.path.exists(index):
+        return [], []
+    lock = locked(d)
+    try:
+        con = span_connect(d)
+        try:
+            return _span_sync(d, con, now())
+        finally:
+            con.close()
+    finally:
+        lock.close()
+
+
+def span_label(row):
+    return row["key"] or os.path.splitext(row["file"])[0]
+
+
+def span_lines(rows, bad):
+    """What wake prints. Empty when there is nothing to say, so a memory
+    with no spans keeps the output it had."""
+    if not rows and not bad:
+        return []
+    out = ["Spans, gone when their time is up:"]
+    for row in rows:
+        out.append("span %s until %s %s" % (span_label(row), row["until"], row["body"]))
+    for name in bad:
+        out.append("span UNREADABLE %s" % name)
+    return out
+
+
+def _span_attach(parts, tail):
+    """Hang the span lines on the last part when they fit, else pages of
+    their own. They belong at the end: a deadline changes, the tree prefix
+    a caller already read does not."""
+    if not tail:
+        return parts
+    last = parts[-1]
+    size = sum(len(line.encode()) + 1 for line in last)
+    extra = sum(len(line.encode()) + 1 for line in tail)
+    if len(last) + len(tail) <= PART_LINES and size + extra <= PART_CHARS:
+        last.extend(tail)
+        return parts
+    return parts + paginate(tail)
+
+
+def _span_put(d, key, until, written, body):
+    lock = locked(d)
+    try:
+        os.makedirs(span_dir(d), exist_ok=True)
+        con = span_connect(d)
+        try:
+            live, _bad = _span_sync(d, con, now())
+            if key:
+                fname = "k-%s.md" % key
+                for row in live:
+                    if row["key"] == key and row["file"] != fname:
+                        try:
+                            os.remove(os.path.join(span_dir(d), row["file"]))
+                        except FileNotFoundError:
+                            pass
+                        con.execute("DELETE FROM span WHERE file = ?", (row["file"],))
+                replaced = os.path.exists(os.path.join(span_dir(d), fname))
+            else:
+                replaced = False
+                n = 0
+                while True:
+                    fname = "a-%d-%d.md" % (int(written.timestamp()), n)
+                    if not os.path.exists(os.path.join(span_dir(d), fname)):
+                        break
+                    n += 1
+            path = os.path.join(span_dir(d), fname)
+            atomic_write(path, span_render(
+                key, format_instant(until), format_instant(written), body))
+            mtime = os.stat(path).st_mtime_ns
+            con.execute("INSERT OR REPLACE INTO span VALUES (?,?,?,?,?,?)",
+                        (fname, key or "", format_instant(until),
+                         format_instant(written), body, mtime))
+            con.commit()
+        finally:
+            con.close()
+        return fname, replaced
+    finally:
+        lock.close()
+
+
+def _span_find(rows, name):
+    """A key wins over a file stem, so a key that looks like a filename
+    still drops the note it names."""
+    for row in rows:
+        if row["key"] and row["key"] == name:
+            return row
+    for row in rows:
+        stem = os.path.splitext(row["file"])[0]
+        if name == row["file"] or name == stem:
+            return row
+    return None
+
+
 # ---------------------------------------------------------------- commands
 
 TEMPLATE = """\
@@ -520,6 +846,8 @@ learn about their life (even indirectly), any event of lasting effect.
 
 Do not register redundant memories.
 
+If it will be false on a date, use `span` instead of `note`.
+
 If `{memo} note` asks a compression: do it before your next action.
 
 Never edit or delete anything under `{data}`: the tool manages it.
@@ -532,6 +860,27 @@ Your memories also form a binary tree: #0-1, #2-3 ... exist as one-line
 summaries, pairs of those as #0-3, and so on -- every `#a-b` line wake
 prints is one node of it. `{memo} zoom <a-b>` opens a node into its
 two halves, down to the raw memories.
+
+`{memo} when <id>` or `{memo} when <lo>-<hi>` prints the dates of a
+memory or a block. Summaries drop dates; this puts them back.
+
+### Notes that expire
+
+A fact with a deadline is not a memory. Merged into the tree, it would
+still be there when it was false.
+
+`{memo} span <when> "<one line>"` records one. `<when>` is `5d`, `12h`,
+`30m`, a day `YYYY-MM-DD` (through the end of that UTC day), or an
+instant `YYYY-MM-DDTHH:MM:SSZ`.
+
+`{memo} span -k <key> <when> "<one line>"` replaces the note of that
+key. `{memo} span` lists the ones still live. `{memo} span drop <key>`
+removes one now.
+
+Wake prints live spans after the tree, each with its deadline, and
+deletes them when the deadline passes. They stay out of the log:
+`recall` will not find them and `nap` will not keep them. If one turns
+out to be permanent, `note` the part that should last before it expires.
 
 ### If you're a subagent: skip everything above
 
@@ -598,6 +947,9 @@ def cmd_wake(d, args):
     if not T:
         print("No memories yet. Record the first with: %s note \"<one line>\""
               % ME)
+        rows, bad = span_open(d)
+        for line in span_lines(rows, bad):
+            print(line)
         print("You are awake.")
         return
     lines = []
@@ -628,6 +980,8 @@ def cmd_wake(d, args):
                     % (lo, hi - 1, ME, lo, hi - 1))
             lines.append("#%d-%d %s" % (lo, hi - 1, s))
     parts = paginate(lines)
+    rows, bad = span_open(d)
+    parts = _span_attach(parts, span_lines(rows, bad))
     if not 1 <= k <= len(parts):
         die("No part %d: the memory has %s. Run: %s wake"
             % (k, plural(len(parts), "part"), ME))
@@ -782,6 +1136,84 @@ def cmd_zoom(d, args):
                                  or "not compressed yet"))
 
 
+def cmd_when(d, args):
+    """Dates the summary dropped. One memory, or the first and last of a
+    block. Two seeks: the log is fixed width."""
+    if len(args) != 1:
+        die("usage: %s when <id> | <lo>-<hi>" % ME)
+    T = log_len(d)
+    spec = args[0]
+    if re.fullmatch(r"\d+", spec):
+        i = int(spec)
+        if i >= T:
+            die("#%d is beyond the memory: it holds %s. Run: %s wake"
+                % (i, plural(T, "memory"), ME))
+        print("#%d %s" % (i, log_get(d, i)[1]))
+        return
+    lo, hi = block_id(spec)
+    if lo >= T:
+        die("#%s is beyond the memory: it holds %s. Run: %s wake"
+            % (spec, plural(T, "memory"), ME))
+    last = min(hi, T) - 1
+    print("#%d-%d %s .. %s" % (lo, last, log_get(d, lo)[1], log_get(d, last)[1]))
+
+
+def cmd_span(d, args):
+    """A note that dies at a deadline. Never written to the log."""
+    usage = ("usage: %s span [<when> \"<one line>\" | -k <key> <when> \"<one line>\" | drop <key>]"
+             % ME)
+    if not args:
+        rows, bad = span_open(d)
+        lines = span_lines(rows, bad)
+        print("\n".join(lines) if lines else "No live spans.")
+        return
+    if args[0] == "drop":
+        if len(args) != 2:
+            die("usage: %s span drop <key>" % ME)
+        rows, _bad = span_open(d)
+        row = _span_find(rows, args[1])
+        if row is None:
+            die("No live span '%s'." % args[1])
+        lock = locked(d)
+        try:
+            try:
+                os.remove(os.path.join(span_dir(d), row["file"]))
+            except FileNotFoundError:
+                pass
+            if os.path.exists(span_index(d)):
+                con = span_connect(d)
+                try:
+                    con.execute("DELETE FROM span WHERE file = ?", (row["file"],))
+                    con.commit()
+                finally:
+                    con.close()
+        finally:
+            lock.close()
+        print("Dropped %s." % span_label(row))
+        return
+    key = None
+    if args[0] == "-k":
+        if len(args) != 4:
+            die(usage)
+        key, when, text = args[1], args[2], args[3]
+        if not _KEY.fullmatch(key):
+            die("A span key is lowercase letters, digits, '_' and '-', "
+                "starting with a letter or digit, at most 64 characters.")
+    elif len(args) == 2:
+        when, text = args
+    else:
+        die(usage)
+    text = check(text)
+    moment = now()
+    until = parse_when(when, moment)
+    if until <= moment:
+        die("That deadline is already past: %s." % format_instant(until))
+    fname, replaced = _span_put(d, key, until, moment, text)
+    label = key or os.path.splitext(fname)[0]
+    print("%s span %s until %s." % ("Replaced" if replaced else "Saved",
+                                    label, format_instant(until)))
+
+
 def cmd_import(d, args):
     """Bulk-append historical memories: 'YYYY-MM-DD <text>' per line.
     For bootstrapping an identity from older records. Used once."""
@@ -825,6 +1257,7 @@ def cmd_import(d, args):
 
 COMMANDS = {"init": cmd_init, "wake": cmd_wake, "note": cmd_note,
             "nap": cmd_nap, "recall": cmd_recall, "zoom": cmd_zoom,
+            "when": cmd_when, "span": cmd_span,
             "forget": cmd_forget, "config": cmd_config, "import": cmd_import}
 
 

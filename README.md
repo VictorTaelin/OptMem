@@ -25,6 +25,8 @@ The tool lands at `~/.optmem/memo`; put `~/.optmem` on `PATH` to type `memo`.
 | `memo nap` | answer the merges that came due |
 | `memo recall <regex>` | search every memory ever recorded, word for word |
 | `memo zoom <lo>-<hi>` | open a tree node into its two halves |
+| `memo when <id>` or `<lo>-<hi>` | the dates a summary dropped |
+| `memo span <when> "..."` | a note that dies at a deadline, kept out of the log |
 | `memo forget <lo>-<hi>` | drop a bad summary; the next nap rebuilds it |
 
 Merges arrive one at a time, in the output of `note`. Nothing ever runs in the
@@ -38,6 +40,8 @@ background.
   memory/
     LOG.txt     every memory, one per line, append-only, never edited
     TREE/       the summaries: a cache, rebuildable from the log alone
+    span/       deadline notes: one markdown file each, deleted when due
+    span.sqlite the index of span/, rebuilt from the files when they disagree
     config      the sizes, written by `memo config`
 ```
 
@@ -84,6 +88,8 @@ learn about their life (even indirectly), any event of lasting effect.
 
 Do not register redundant memories.
 
+If it will be false on a date, use `span` instead of `note`.
+
 If `~/.optmem/memo note` asks a compression: do it before your next action.
 
 Never edit or delete anything under `~/.optmem/memory`: the tool manages it.
@@ -96,6 +102,27 @@ Your memories also form a binary tree: #0-1, #2-3 ... exist as one-line
 summaries, pairs of those as #0-3, and so on -- every `#a-b` line wake
 prints is one node of it. `~/.optmem/memo zoom <a-b>` opens a node into its
 two halves, down to the raw memories.
+
+`~/.optmem/memo when <id>` or `~/.optmem/memo when <lo>-<hi>` prints the
+dates of a memory or a block. Summaries drop dates; this puts them back.
+
+### Notes that expire
+
+A fact with a deadline is not a memory. Merged into the tree, it would
+still be there when it was false.
+
+`~/.optmem/memo span <when> "<one line>"` records one. `<when>` is `5d`,
+`12h`, `30m`, a day `YYYY-MM-DD` (through the end of that UTC day), or an
+instant `YYYY-MM-DDTHH:MM:SSZ`.
+
+`~/.optmem/memo span -k <key> <when> "<one line>"` replaces the note of
+that key. `~/.optmem/memo span` lists the ones still live.
+`~/.optmem/memo span drop <key>` removes one now.
+
+Wake prints live spans after the tree, each with its deadline, and
+deletes them when the deadline passes. They stay out of the log:
+`recall` will not find them and `nap` will not keep them. If one turns
+out to be permanent, `note` the part that should last before it expires.
 
 ### If you're a subagent: skip everything above
 

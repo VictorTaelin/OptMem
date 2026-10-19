@@ -608,6 +608,96 @@ check(fingerprint(d) == before, "init modified an existing memory")
 r = run("wake")
 check(r.stdout.rstrip().endswith("You are awake."), "wake broke after re-init")
 
+# when: the dates a summary dropped, in two seeks
+r = run("when", "7")
+check(r.returncode == 0 and r.stdout.strip() == "#7 2020-01-02",
+      "when on one memory: " + r.stdout + r.stderr)
+r = run("when", "0-127")
+check(r.stdout.strip() == "#0-127 2020-01-01 .. 2020-01-26",
+      "when on a block: " + r.stdout)
+check(run("when", "3-9").returncode == 1, "when accepted a non-block")
+check(run("when", "999999").returncode == 1, "when past the end should fail")
+
+# a span is not a memory: the log does not grow, an earlier wake part does
+# not change, and recall cannot find it
+p1 = run("wake", "1").stdout
+logsize = os.path.getsize(os.path.join(d, "LOG.txt"))
+r = run("span", "-k", "quota", "5d", "SPANTOKEN-9f3a claude usage runs out")
+check(r.returncode == 0 and r.stdout.startswith("Saved span quota until "),
+      "span did not save: " + r.stdout + r.stderr)
+check(os.path.getsize(os.path.join(d, "LOG.txt")) == logsize, "span appended to the log")
+after = run("wake", "1").stdout
+# Spans hang on the last part. An earlier part is byte-identical; the
+# only part of a short wake keeps its tree lines and gains the span.
+if "You are awake." not in p1:
+    check(after == p1, "a span changed an already-rendered wake part")
+else:
+    def trees(text):
+        return [ln for ln in text.splitlines() if ln.startswith("#")]
+    check(trees(after) == trees(p1), "a span rewrote the tree lines of wake")
+check("No match." in run("recall", "SPANTOKEN-9f3a").stdout,
+      "recall found a span; spans must stay out of the log")
+check("Nothing left to compress" in run("nap").stdout,
+      "a span created a compression")
+saw, k = False, 1
+while True:
+    r = run("wake", str(k))
+    check(r.returncode == 0, "wake failed after a span: " + r.stdout + r.stderr)
+    if "SPANTOKEN-9f3a" in r.stdout:
+        saw = True
+        check(r.stdout.rstrip().endswith("You are awake."),
+              "the span was not on the last part:\n" + r.stdout)
+        check("span quota until " in r.stdout, "wake did not label the span")
+    if "You are awake." in r.stdout:
+        break
+    k += 1
+    if k > 20:
+        break
+check(saw, "wake never printed the span")
+r = run("span", "-k", "quota", "10d", "SPANTOKEN-9f3a usage extended")
+check(r.stdout.startswith("Replaced span quota "), "replacing a key did not say so: " + r.stdout)
+names = [f for f in os.listdir(os.path.join(d, "span")) if f.endswith(".md")]
+check(names == ["k-quota.md"], "a replaced key left extra files: %s" % names)
+check("usage extended" in open(os.path.join(d, "span", "k-quota.md"), encoding="utf-8").read(),
+      "the file does not hold the new text")
+os.remove(os.path.join(d, "span.sqlite"))
+check("usage extended" in run("span").stdout, "span list did not rebuild a deleted index")
+with open(os.path.join(d, "span", "notes.md"), "w") as f:
+    f.write("this is not a span\n")
+with open(os.path.join(d, "span", "k-quota.md.new"), "w") as f:
+    f.write("a torn write\n")
+r = run("span")
+check("UNREADABLE notes.md" in r.stdout and "torn write" not in r.stdout,
+      "a stray file was indexed or a .new was read: " + r.stdout)
+check(run("span", "drop", "quota").stdout.strip() == "Dropped quota.",
+      "drop did not remove the key")
+check("No live spans." not in run("span").stdout and "UNREADABLE" in run("span").stdout,
+      "drop removed the stray file too")
+os.remove(os.path.join(d, "span", "notes.md"))
+check(run("span").stdout.strip() == "No live spans.", "a dropped span is still live")
+
+# deadlines are absolute. OPTMEM_NOW is the test clock.
+d6 = tempfile.mkdtemp(prefix="optmem-span-")
+os.environ["OPTMEM_NOW"] = "2026-10-19T00:00:00Z"
+r = run("span", "5d", "gone next week", store=d6)
+check("until 2026-10-24T00:00:00Z" in r.stdout, "5d did not land on the instant: " + r.stdout)
+r = run("span", "2026-10-24", "through that day", store=d6)
+check("until 2026-10-24T23:59:59Z" in r.stdout, "a date must last through that day: " + r.stdout)
+check(run("span", "2020-01-01", "already over", store=d6).returncode == 1,
+      "a past deadline was accepted")
+check(run("span", "-k", "Bad Key", "1d", "no", store=d6).returncode == 1,
+      "a bad span key was accepted")
+os.environ["OPTMEM_NOW"] = "2026-10-24T00:00:00Z"
+r = run("wake", store=d6)
+check("gone next week" not in r.stdout and "through that day" in r.stdout,
+      "expiry kept a dead span or dropped a live one: " + r.stdout)
+check(not any(n.endswith(".md") and n.startswith("a-") and "gone" in open(
+    os.path.join(d6, "span", n), encoding="utf-8").read()
+    for n in os.listdir(os.path.join(d6, "span")) if n.endswith(".md")),
+      "the expired span file is still on disk")
+os.environ.pop("OPTMEM_NOW", None)
+shutil.rmtree(d6)
+
 shutil.rmtree(d2)
 shutil.rmtree(d)
 print("\n%d passed, %d failed" % (ok, fail))
